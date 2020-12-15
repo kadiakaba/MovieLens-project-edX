@@ -1,0 +1,442 @@
+---
+title: "MovieLens Project Kadiatou KABA"
+author: "Kadiatou Kaba"
+date: "12/16/2020"
+output: word_document
+
+---
+
+
+
+```{r, Global Settings, echo = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+```{r, Load the Libraries}
+library(tidyverse)
+library(caret)
+library(lubridate)
+library(data.table)
+library(ggplot2)
+library(psych)
+library(rmarkdown)
+```
+
+
+# Introduction
+
+In this report, the **MovieLens 10M dataset** was used to create a **movie recommendation system algorithm** that can be used to predict the way a certain user will rate a certain movie.
+
+This **dataset** consists of 10,000,000 ratings of 10,000 movies by 72,000 users on a five-star scale. 
+
+It was pulled directly from the MovieLens website (https://grouplens.org/datasets/movielens/10m/).
+
+The raw dataset was wrangled into a data frame, then split into the _edx_ training dataset and the _validation_ testing dataset.
+
+The datasets were cleaned up, wrangled, and coerced into a more useable format.
+
+The _edx_ dataset was explored and analyzed by plotting the data through the lenses of different potential effects. Then, some descriptive analysis were done on the _edx_ dataset.
+
+In order to aim the objective of the report, an equation for the root mean squared error (RMSE) was defined as the target parameter.
+
+Several models were trained using the _edx_ dataset such as naive mean and effects. Then, these models were evaluated on the _validation_ dataset. The most effective models were therefore combined to obtain the final model.
+
+Using the method below, a **movie recommendation system algorithm** with an **RMSE** of **0.863** was developed.
+
+
+# Data Analysis and Model Development
+
+## Create the Datasets
+
+The raw datasets were pulled directly from the MovieLens website and saved to a temporary file. From the temporary file, the data was pulled in and coerced into two data frames, the _ratings_ data frame, with columns <u>userId</u>, <u>movieId</u>, <u>rating</u>, and <u>timestamp</u>, and the _movies_ data frame, with columns <u>movieId</u>, <u>title</u>, and <u>genres</u>. The two data frames were joined together by <u>movieId</u>, creating a new _movielens_ data frame with six columns, <u>userId</u>, <u>movieId</u>, <u>rating</u>, <u>timestamp</u>, <u>title</u>, and <u>genres</u>.
+
+```{r, Pull Data from MovieLens Website}
+dl <- tempfile()  
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl) 
+ratings <- str_split_fixed(readLines(unzip(dl,"ml-10M100K/ratings.dat")), "\\::", 4) 
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")  
+ratings <- as.data.frame(ratings) %>%
+  mutate(userId = as.numeric(userId), 
+         movieId = as.numeric(levels(movieId))[movieId], 
+         rating = as.numeric(levels(rating))[rating], 
+         timestamp = as.numeric(levels(timestamp))[timestamp]) 
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3) 
+colnames(movies) <- c("movieId", "title", "genres") 
+movies <- as.data.frame(movies) %>% 
+  mutate(movieId = as.numeric(levels(movieId))[movieId], 
+         title = as.character(title), 
+         genres = as.character(genres))
+movielens <- left_join(ratings, movies, by = "movieId") 
+rm(dl, movies, ratings) # remove unneeded variables in global environment
+```
+
+##### _movielens_ Dataset
+
+```{r, Display MovieLens Dataset}
+head(movielens)
+```
+
+The _movielens_ dataset was then split into two datasets, the _edx_ training dataset consisting of 90% of the data and the _temp_ dataset consisting of the remaining 10% of the data. Movies that only appear in the _temp_ dataset were removed, creating the _validation_ testing dataset. Those removed movies were then added to the _edx_ dataset.
+
+```{r, Create edx (Train) and validation (Test) Datasets}
+set.seed(1) # set seed to 1
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE) # create index with 10% of data for test set
+edx <- movielens[-test_index,]  # create edx (train) dataset from test index
+temp <- movielens[test_index,]  
+validation <- temp %>%  # create final validation (test) dataset from temporary dataset
+  semi_join(edx, by = "movieId") %>%  
+  semi_join(edx, by = "userId")
+removed <- anti_join(temp, validation)  # identify movies and users that were removed from temporary test set
+edx <- rbind(edx, removed)  # add movies and users removed from temporary test set to edx train set
+rm(test_index, temp, movielens, removed)  # remove unneeded data from global environment
+```
+
+##### _edx_ Dataset
+
+```{r, Display edx Dataset}
+head(edx) 
+```
+
+##### _validation_ Dataset
+
+```{r, Display validation Dataset}
+head(validation)  
+```
+
+## Clean the Datasets
+
+Looking at the _edx_ dataset again, there is some data cleaning that can be done to make the data easier to visualize and analyze (on data types especially).
+
+##### _edx_ Dataset
+
+```{r, Display edx Dataset Again}
+head(edx) 
+```
+
+The <u>timestamp</u> column is the time the review was submitted, formatted as the number of seconds since January 1, 1970. It can be converted to a date_time data type.
+
+The movie release year is included in <u>title</u> column. It can be extracted, added as the new column <u>year</u>, and converted to a numeric data type.
+
+Some movies fall into more than one genre in the <u>genres</u> column. Reviews of movies with more than one genre can be separated out by genre into multiple duplicate reviews with one genre per review.
+
+##### Cleaned _edx_ Dataset
+
+```{r, edx Data Cleaning}
+edx <- edx %>% 
+  mutate(timestamp = as_datetime(timestamp)) %>%  
+  mutate(year = substring(title, nchar(title) - 6)) %>% 
+  mutate(year = as.numeric(substring(year, regexpr("\\(", year) + 1, regexpr("\\)", year) - 1))) %>% 
+  separate_rows(genres, sep = "\\|") 
+head(edx, 19) 
+```
+
+The same steps were carried out on the _validation_ dataset.
+
+```{r, validation Data Cleaning}
+validation <- validation %>%  
+  mutate(timestamp = as_datetime(timestamp)) %>%  
+  mutate(year = substring(title, nchar(title) - 6)) %>% 
+  mutate(year = as.numeric(substring(year, regexpr("\\(", year) + 1, regexpr("\\)", year) - 1))) %>% 
+  separate_rows(genres, sep = "\\|")  
+```
+
+## Cursory Data Visualizations and Analysis
+
+All visualizations and analyses were performed with the _edx_ training dataset.
+
+The average rating is 3.53 stars. The median rating is 4.
+
+```{r, Average and Median}
+avg_rating <- mean(edx$rating)  
+med_rating <- median(edx$rating) 
+```
+
+Grouping the data by rating shows that four stars is most common rating and that full star ratings are given more often than half star ratings.
+
+##### Ratings
+
+```{r, Group by Rating}
+edx_ratings <- edx %>%  
+  group_by(rating) %>%  
+  summarize(num_ratings = n()) %>%
+  arrange(desc(num_ratings))
+edx_ratings
+edx_ratings %>% # for each rating, plot frequency
+  ggplot(aes(rating, num_ratings, color = rating)) +
+  geom_point(aes(size = num_ratings)) +
+  scale_color_gradientn(colours = rainbow(5)) +
+  scale_size_continuous(limits = c(0, 7e+06)) +
+  xlim(0,5) +
+  labs(x = "Rating", y = "Number of Ratings", title = "Ratings by Rating", color = "Rating", size = "Number of Ratings")
+```
+
+Grouping the data by movie shows that in general, movies that are reviewed often have higher average ratings and that there is more variation in average ratings for movies that have few reviews.
+
+##### Movies
+
+```{r, Group by Movie}
+edx_movies <- edx %>%
+  group_by(movieId) %>% 
+  summarize(num_ratings = n(), avg_rating = mean(rating)) %>% 
+  arrange(desc(num_ratings))
+headTail(edx_movies)  # display top and bottom movies by number of ratings
+edx_movies %>% # for each movie, plot the number of ratings v num of ratings
+  ggplot(aes(movieId, num_ratings, color = avg_rating)) +
+  geom_point() +
+  scale_color_gradientn(colours = rainbow(5)) +
+  labs(x = "MovieId", y = "Number of Ratings", title = "Ratings by Movie", color = "Average Rating")
+```
+
+Grouping the data by user shows that most users give an average rating near the overall average and that there is more variation in average ratings for users that have only given a few ratings, when compared to users that have rated many movies.
+
+##### Users
+
+```{r, Group by User}
+edx_users <- edx %>% 
+  group_by(userId) %>% 
+  summarize(num_ratings = n(), avg_rating = mean(rating)) %>%
+  arrange(desc(num_ratings)) 
+headTail(edx_users) # display top and bottom users by number of ratings
+edx_users %>% # for each movie, plot the number of ratings v num of ratings
+  ggplot(aes(userId, num_ratings, color = avg_rating)) +
+  geom_point() +
+  scale_color_gradientn(colours = rainbow(5)) +
+  labs(x = "UserId", y = "Number of Ratings", title = "Ratings by User", color = "Average Rating")
+```
+
+Grouping the data by genre shows that the most common genres are Drama, Comedy, and Action and that the best rated genres, like Film-Noir, War, and Documentary have fewer movies and ratings.
+
+##### Genres
+
+```{r, Group by Genre}
+edx_genres <- edx %>% 
+  group_by(genres) %>% 
+  summarize(num_ratings = n(), avg_rating = mean(rating)) %>% 
+  arrange(desc(num_ratings)) 
+edx_genres
+edx_genres %>% # for each genre, plot the number of ratings and average rating
+  ggplot(aes(genres, avg_rating)) +
+  geom_point(aes(size = num_ratings)) +
+  scale_size_continuous(limits = c(0, 7e+06)) +
+  labs(x = "Genre", y = "Average Rating", title = "Ratings by Genre", size = "Number of Ratings") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Grouping the data by movie release year shows that pre-1980 years are better rated than post-1980 years and that movies released in recent years have received more ratings.
+
+##### Release Year
+
+```{r, Group by Year}
+edx_years <- edx %>% 
+  group_by(year) %>% 
+  summarize(num_ratings = n(), avg_rating = mean(rating)) %>% 
+  arrange(desc(num_ratings)) 
+headTail(edx_years) 
+edx_years %>% # for each year, plot the number of ratings and average rating
+  ggplot(aes(year, avg_rating, size = num_ratings)) +
+  geom_point(aes(size = num_ratings)) +
+  scale_size_continuous(limits = c(0, 7e+06)) +
+  labs(x = "Year", y = "Average Rating", title = "Ratings by Year", size = "Number of Ratings")
+```
+
+
+
+## Defining RMSE
+
+The goal of this project is to develop an algorithm with the lowest possible residual mean squared error (RMSE). RMSE is defined as the error that the algorithm makes when predicting a rating, or:
+
+$$\sqrt{\frac{1}{N} \sum_{e} (\hat{y}_{e} - y_{e})^2}$$
+
+where $N$ is the total number of user/movie ratings, $\hat{y}_{e}$ is the predicted rating for a particular review given effects $e$, and $y_{e}$ is the actual rating for a particular review given effects $e$.
+
+```{r, Define Function to Calculate RMSE}
+rmse <- function(true_ratings, predicted_ratings){  # define function that takes true ratings and predicted ratings and...
+  sqrt(mean((true_ratings - predicted_ratings)^2))  # ...calculates residual mean squared error
+}
+```
+
+An RMSE of 1 would mean that on average, the rating that the algorithm predicted is one star off the actual rating.
+
+## Modeling Approach
+
+### A Simple Model - Average
+
+The simplest model predicts the same rating for each review, regardless of effects like movie, user, genre, etc. This model can be defined as:
+
+$$Y = \mu + \epsilon$$
+where $Y$ is the outcome (predicted rating), $\mu$ is the average rating, and $\epsilon$ is the error.
+
+```{r, Model 1 - Average}
+average <- mean(edx$rating)  # calculate the average rating
+rmse_average <- rmse(validation$rating, average) # calculate rmse for model
+model_rmses <- tibble(model = "Average", rmse = rmse_average) # create a table to display all the calculated rmses
+```
+
+The **RMSE** of the **Average** model is **1.052**.
+
+### Introducing Effects
+
+Introducing effects allows the model to take variability into account. Looking at the visualizations above, for example, some movies are, on average, rated higher than others and certain genres tend to receive lower average ratings than others. The effects model can be defined as:
+
+$$Y = \mu + e_a + \epsilon$$
+
+where $e_a$ is the effect term of effect $a$.
+
+For modeling purposes, the least square estimate of $e_a$ is the average of $Y_a - \mu$ for each instance of effect $a$.
+
+Based on the above visualizations, movie, user, genre, year released, and years between release and review effects were all introduced to the model.
+
+### Movie Effect
+
+The **Average + Movie Effect** model is defined as
+
+$$Y = \mu + e_m + \epsilon$$
+
+where $e_m$ is the effect term for movie $m$.
+
+```{r, Model 2 - Movie Effect}
+movie_effect <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(e_m = mean(rating - average)) # calculate e_m for each movie by taking average of difference between each rating and average rating
+
+movie_pred_ratings <- validation %>% # take testing dataset and...
+  left_join(movie_effect, by ="movieId") %>% # ...join it to training data set by movie and...
+  mutate(predicted_rating = average + e_m) %>% # ...calculate predicted ratings and...
+  pull(predicted_rating)  # ...pull predicted ratings
+
+rmse_movie_effect <- rmse(validation$rating, movie_pred_ratings)  # calculate rmse for model
+model_rmses <- bind_rows(model_rmses,
+                         tibble(model = "Average + Movie Effect", rmse = rmse_movie_effect)) # add calculated rmse to rmse table
+```
+
+The **RMSE** of the **Average + Movie Effect** model is **0.941**.
+
+### User Effect
+
+The **Average + User Effect** model is defined as
+
+$$Y = \mu + e_u + \epsilon$$
+where $e_u$ is the effect term for user $u$.
+
+```{r, Model 3 - User Effect}
+user_effect <- edx %>% 
+  group_by(userId) %>%  
+  summarize(e_u = mean(rating - average)) # ...calculate e_u for each user by taking average of difference between each rating and average rating
+
+user_pred_ratings <- validation %>% # take test dataset and...
+  left_join(user_effect, by = "userId") %>% # ...join it to training dataset by user and...
+  mutate(predicted_rating = average + e_u) %>% #...calculate predicted ratings and...
+  pull(predicted_rating)  # ...pull predicted ratings
+
+rmse_user_effect <- rmse(validation$rating, user_pred_ratings)  # calculate rmse for model
+model_rmses <- bind_rows(model_rmses,
+                         tibble(model = "Average + User Effect", rmse = rmse_user_effect)) # add calculated rmse to rmse table
+```
+
+The **RMSE** of the **Average + User Effect** model is **0.973**.
+
+### Genre Effect
+
+The **Average + Genre Effect** model is defined as
+
+$$Y = \mu + e_g + \epsilon$$
+where $e_g$ is the effect term for genre $g$.
+
+```{r, Model 4 - Genre Effect}
+genre_effect <- edx %>% 
+  group_by(genres) %>% 
+  summarize(e_g = mean(rating - average)) # calculate e_g for each genre by taking average of difference between each rating and average rating
+
+genre_pred_ratings <- validation %>% # take test dataset and...
+  left_join(genre_effect, by = "genres") %>%  # ...join it to training dataset by genre and...
+  mutate(predicted_rating = average + e_g) %>% # ...calculate predicted ratings and...
+  pull(predicted_rating)  # pull predicted ratings
+
+rmse_genre_effect <- rmse(validation$rating, genre_pred_ratings)  # calculate rmse for model
+model_rmses <- bind_rows(model_rmses,
+                         tibble(model = "Average + Genre Effect", rmse = rmse_genre_effect)) # add calculated rmse to rmse table
+```
+
+The **RMSE** of the **Average + Genre Effect** model is **1.046**.
+
+### Year Effect
+
+The **Average + Year Effect** model is defined as
+
+$$Y = \mu + e_y + \epsilon$$
+where $e_y$ is the effect term for release year $y$.
+
+```{r, Model 5 - Year Effect}
+year_effect <- edx %>% 
+  group_by(year) %>% 
+  summarize(e_y = mean(rating - average)) # calculate e_y for each year by taking average of difference between each rating and average rating
+
+year_pred_ratings <- validation %>% # take test dataset and...
+  left_join(year_effect, by = "year") %>% # join it to training dataset by time between release and ratings and...
+  mutate(predicted_rating = average + e_y) %>% # ...calculate predicted ratings and...
+  pull(predicted_rating)  # ...pull predicted ratings
+
+rmse_year_effect <- rmse(validation$rating, year_pred_ratings)  # calculate rmse for model
+model_rmses <- bind_rows(model_rmses,
+                         tibble(model = "Average + Year Effect", rmse = rmse_year_effect)) # add calculated rmse to rmse table
+```
+
+The **RMSE** of the **Average + Year Effect** model is **1.042**.
+
+
+# Results - The Best Model
+
+Looking that the models described above, only two of them, **Movie Effect** and **User Effect** made significant improvements to the **Average** model.
+
+```{r, display model_rmses}
+model_rmses  # display calculated RMSES
+```
+
+By combining these two effects, the model should become more accurate.
+
+The **Average + Movie + User Effects** model is defined as
+
+$$Y = \mu + e_m + e_u + \epsilon$$
+
+```{r, Model 6 - Combine the Best Effects}
+movie_effect <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(e_m = mean(rating - average)) # calculate e_m for each movie by taking average of difference between each rating and average rating
+
+movie_user_effect <- edx %>% # take data and...
+  left_join(movie_effect, by = "movieId") %>% # join it to movie_effect dataset by movie and...
+  group_by(userId) %>% # ...group by user and...
+  summarize(e_u = mean(rating - average - e_m)) # ... calculate e_u for each user by taking average of difference between each rating and average rating and calculated e_m
+
+movie_user_pred_ratings <- validation %>% # take test dataset and...
+  left_join(movie_effect, by = "movieId") %>%  # join it to movie_effect dataset by movie and...
+  left_join(movie_user_effect, by = "userId") %>% # join it to movie_effect dataset by movie and...
+  mutate(predicted_rating = average + e_m + e_u) %>% # ...calculate predicted ratings and...
+  pull(predicted_rating)  # ...pull predicted ratings
+
+best_model_rmse <- rmse(validation$rating, movie_user_pred_ratings)  # calculate rmse for model
+model_rmses <- bind_rows(model_rmses,
+                         tibble(model = "Average + Movie + User Effects", rmse = best_model_rmse)) # add calculated rmse to rmse table
+```
+
+##### Best Effects Model
+
+```{r, display best model_rmse}
+model_rmses[6,]
+```
+
+
+The **RMSE** of the **Average + Movie + User Effect** model is **0.863**.
+
+
+# Conclusions
+
+After visually analyzing and examining the data and testing several models, an algorithm to predict movie ratings with an **RMSE** of **0.863** was developed by defining a model that included effects.
+
+$$Y = \mu + e_m + e_u + \epsilon$$
+
+```{r, include=FALSE}
+options(tinytex.verbose = TRUE)
+```
